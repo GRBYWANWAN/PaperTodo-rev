@@ -67,6 +67,7 @@ internal static partial class Program
             ServiceBehavior();
             StartupApprovalBehavior();
             CatalogBehavior();
+            TopBarShortcutBehavior();
             TodoMoveBehavior();
             AdapterBehavior();
             SharedUiSettingBehavior();
@@ -79,6 +80,108 @@ internal static partial class Program
             return 0;
         }
         catch (Exception ex) { Console.Error.WriteLine(ex); return 1; }
+    }
+
+    private static void TopBarShortcutBehavior()
+    {
+        var state = new AppState();
+        Check(PaperTopBarShortcuts.Get(state, PaperTypes.Todo).Count == 0 &&
+              PaperTopBarShortcuts.Get(state, PaperTypes.Note).Count == 0,
+            "New installs start with optional title-bar shortcuts tucked into the menu.");
+
+        PaperTopBarShortcuts.Set(state, PaperTypes.Note, PaperTopBarShortcuts.NewTodo, true);
+        PaperTopBarShortcuts.Set(state, PaperTypes.Note, PaperTopBarShortcuts.NewNote, true);
+        Check(PaperTopBarShortcuts.Move(state, PaperTypes.Note, PaperTopBarShortcuts.NewNote, -1) &&
+              PaperTopBarShortcuts.Get(state, PaperTypes.Note).SequenceEqual(
+                  [PaperTopBarShortcuts.NewNote, PaperTopBarShortcuts.NewTodo]),
+            "Pinned Note commands retain explicit user-defined order.");
+        Check(!PaperTopBarShortcuts.Move(state, PaperTypes.Note, PaperTopBarShortcuts.NewNote, -1) &&
+              !PaperTopBarShortcuts.Contains(state, PaperTypes.Todo, PaperTopBarShortcuts.NewTodo),
+            "Moving past the edge does nothing; Note shortcuts do not change Todo shortcuts.");
+        var normalized = PaperTopBarShortcuts.Normalize(PaperTypes.Todo,
+            [PaperTopBarShortcuts.PluginActions, PaperTopBarShortcuts.NewTodo,
+             PaperTopBarShortcuts.NewTodo, "unknown", PaperTopBarShortcuts.ExternalEditor]);
+        Check(normalized.SequenceEqual([PaperTopBarShortcuts.NewTodo, PaperTopBarShortcuts.PluginActions]),
+            "Unknown and duplicate pins are dropped; plugins are always last.");
+        state.TodoTopBarShortcuts = normalized;
+        Check(!PaperTopBarShortcuts.Move(state, PaperTypes.Todo,
+                PaperTopBarShortcuts.PluginActions, -1) &&
+              !PaperTopBarShortcuts.Move(state, PaperTypes.Todo,
+                PaperTopBarShortcuts.NewTodo, 1),
+            "Plugin pin priority cannot be changed by built-in shortcut sorting.");
+
+        var controller = Controller();
+        controller.State.TodoTopBarShortcuts = [PaperTopBarShortcuts.Association];
+        controller.State.NoteTopBarShortcuts = [PaperTopBarShortcuts.NewNote];
+        var service = SettingsFor(controller, () => false, _ => { });
+        Throws<PaperSettingsException>(
+            () => service.Set("topbar.new_todo", Json(true)), "save_failed");
+        Check(controller.State.TodoTopBarShortcuts.SequenceEqual([PaperTopBarShortcuts.Association]) &&
+              controller.State.NoteTopBarShortcuts.SequenceEqual([PaperTopBarShortcuts.NewNote]),
+            "Legacy public topbar alias rolls back both asymmetric lists after save failure.");
+
+        // A composite legacy boolean reports false for mixed per-type values, but an
+        // explicit Set(false) must still remove the pin from the other paper type.
+        controller.State.TodoTopBarShortcuts = [PaperTopBarShortcuts.NewTodo];
+        controller.State.NoteTopBarShortcuts = [PaperTopBarShortcuts.NewNote];
+        var commits = 0;
+        var composite = SettingsFor(controller, () => { commits++; return true; }, _ => { });
+        var cleared = composite.Set("topbar.new_todo", Json(false));
+        Check(cleared.Changed && commits == 1 &&
+              !PaperTopBarShortcuts.Contains(controller.State, PaperTypes.Todo, PaperTopBarShortcuts.NewTodo) &&
+              !PaperTopBarShortcuts.Contains(controller.State, PaperTypes.Note, PaperTopBarShortcuts.NewTodo),
+            "Legacy Set(false) clears a partly configured shortcut instead of falsely reporting no-op.");
+        Check(!composite.Set("topbar.new_todo", Json(false)).Changed && commits == 1,
+            "Both values matching the desired legacy setting are a genuine no-op.");
+
+        controller.State.TodoTopBarShortcuts = [PaperTopBarShortcuts.NewTodo];
+        controller.State.NoteTopBarShortcuts = [];
+        var pinnedBoth = composite.Set("topbar.new_todo", Json(true));
+        Check(pinnedBoth.Changed && commits == 2 &&
+              PaperTopBarShortcuts.InBoth(controller.State, PaperTopBarShortcuts.NewTodo),
+            "Legacy Set(true) fills the missing paper type without removing the existing pin.");
+
+        var temp = Path.Combine(Path.GetTempPath(), "PaperTodo-TopBar-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(temp);
+        try
+        {
+            var legacy = new AppState
+            {
+                ShowTopBarNewTodoButton = false,
+                ShowTopBarNewNoteButton = true,
+                ShowTopBarExternalOpenButton = false
+            };
+            var json = JsonSerializer.Serialize(legacy,
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            var root = System.Text.Json.Nodes.JsonNode.Parse(json)!.AsObject();
+            root.Remove("todoTopBarShortcuts");
+            root.Remove("noteTopBarShortcuts");
+            File.WriteAllText(Path.Combine(temp, "data.json"), root.ToJsonString());
+            var store = new StateStore(temp, DurableAtomicFileWriter.Shared);
+            var loaded = store.Load();
+            Check(PaperTopBarShortcuts.Contains(loaded, PaperTypes.Todo, PaperTopBarShortcuts.Association) &&
+                  PaperTopBarShortcuts.Contains(loaded, PaperTypes.Todo, PaperTopBarShortcuts.NewNote) &&
+                  !PaperTopBarShortcuts.Contains(loaded, PaperTypes.Todo, PaperTopBarShortcuts.NewTodo) &&
+                  !PaperTopBarShortcuts.Contains(loaded, PaperTypes.Note, PaperTopBarShortcuts.ExternalEditor),
+                "Old data.json visibility preferences migrate once to per-type ordered shortcuts.");
+            Check(PaperTopBarShortcuts.Get(loaded, PaperTypes.Todo).SequenceEqual(
+                      [PaperTopBarShortcuts.Association, PaperTopBarShortcuts.NewNote, PaperTopBarShortcuts.PluginActions]) &&
+                  PaperTopBarShortcuts.Get(loaded, PaperTypes.Note).SequenceEqual(
+                      [PaperTopBarShortcuts.Association, PaperTopBarShortcuts.NewNote, PaperTopBarShortcuts.PluginActions]),
+                "Migration preserves pinned actions but puts plugin shortcuts last.");
+
+            // Explicit empty arrays are the new minimal preference, not a signal to remigrate.
+            loaded.TodoTopBarShortcuts = [];
+            loaded.NoteTopBarShortcuts = [];
+            var serialized = JsonSerializer.Serialize(loaded,
+                new JsonSerializerOptions { PropertyNamingPolicy = JsonNamingPolicy.CamelCase });
+            File.WriteAllText(Path.Combine(temp, "data.json"), serialized);
+            var reloaded = store.Load();
+            Check(PaperTopBarShortcuts.Get(reloaded, PaperTypes.Todo).Count == 0 &&
+                  PaperTopBarShortcuts.Get(reloaded, PaperTypes.Note).Count == 0,
+                "Explicitly unpinned shortcuts stay unpinned across restart.");
+        }
+        finally { Directory.Delete(temp, recursive: true); }
     }
 
     private static void PostCommitFailureDoesNotReplay()

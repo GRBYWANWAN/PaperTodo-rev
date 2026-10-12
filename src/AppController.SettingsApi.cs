@@ -25,7 +25,7 @@ public sealed partial class AppController
         SettingEffects effects = SettingEffects.None, string? title = null,
         string[]? options = null, double? minimum = null, double? maximum = null,
         double? step = null, bool requiresRestart = false,
-        string description = "")
+        string description = "", Func<T, bool>? isNoOp = null)
     {
         var kind = typeof(T) == typeof(bool) ? "boolean" : typeof(T) == typeof(int) ? "integer" :
             typeof(T) == typeof(double) ? "number" : "string";
@@ -43,7 +43,8 @@ public sealed partial class AppController
             },
             Read = () => JsonSerializer.SerializeToElement(get()),
             Validate = value => ValidatePublicSetting(value, kind, allowed, minimum, maximum, step, id),
-            Begin = value => BeginSettingChange(id, get, set, value.Deserialize<T>()!, effects)
+            Begin = value => BeginSettingChange(id, get, set, value.Deserialize<T>()!, effects),
+            IsNoOp = isNoOp is null ? null : value => isNoOp(value.Deserialize<T>()!)
         };
     }
 
@@ -103,6 +104,10 @@ public sealed partial class AppController
         var oldCapsule = State.UseCapsuleMode;
         var oldDeep = State.UseDeepCapsuleMode;
         var oldTaskbar = State.HidePapersFromTaskbar;
+        var oldTodoTopBar = effects == SettingEffects.TopBar
+            ? new List<string>(State.TodoTopBarShortcuts) : null;
+        var oldNoteTopBar = effects == SettingEffects.TopBar
+            ? new List<string>(State.NoteTopBarShortcuts) : null;
         var oldQueues = effects == SettingEffects.CapsuleMode
             ? new Dictionary<string, bool>(State.CapsuleCollapseAllActiveQueues) : null;
         var titles = id == "title.max_length"
@@ -155,6 +160,10 @@ public sealed partial class AppController
             Rollback: () =>
             {
                 set(previous);
+                // A legacy API switch can affect two per-type layouts. Reversing just the
+                // boolean cannot restore an asymmetric user layout after a rejected save.
+                if (oldTodoTopBar != null) State.TodoTopBarShortcuts = oldTodoTopBar;
+                if (oldNoteTopBar != null) State.NoteTopBarShortcuts = oldNoteTopBar;
                 if (id == "appearance.paper_skin")
                 {
                     // Preserve the legacy null migration sentinel and the last system recipe
