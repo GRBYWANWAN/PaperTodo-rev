@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Interop;
@@ -82,6 +83,7 @@ internal static class MaterialPresentationChecks
             CheckTopBarSettingsDropRouting(controller);
             CheckPaperStartupFade(controller);
             CheckMasterRightClicks(controller);
+            CheckEdgeExternalForeground(controller);
             controller.State.PaperSkin = PaperSkins.Acrylic; controller.State.Theme = "light";
             controller.State.EnableAnimations = false; Theme.Invalidate();
 
@@ -705,6 +707,11 @@ internal static class MaterialPresentationChecks
                     Wait(80);
                 }
             }
+            // Cross-process foreground is different from the same-thread outside window above.
+            // Reproduce a right click on a NOACTIVATE owner while another app is foreground.
+            outside.Close();
+            outside = null;
+            CheckMasterExternalForeground(controller, master, pill, menu);
         }
         finally
         {
@@ -719,6 +726,173 @@ internal static class MaterialPresentationChecks
             (controller.State.PaperSkin, controller.State.Theme, controller.State.EnableAnimations,
                 controller.State.MatchAuxiliaryMaterialStrength) = original;
             Theme.Invalidate();
+        }
+    }
+    private static void CheckEdgeExternalForeground(AppController controller)
+    {
+        var state = controller.State;
+        var original = (state.UseCapsuleMode, state.UseDeepCapsuleMode,
+            state.EnableAnimations, state.ExperimentalEdgeCapsuleHoverPreview,
+            state.PaperSkin, state.Theme, state.MatchAuxiliaryMaterialStrength);
+        var area = SystemParameters.WorkArea;
+        var paper = new PaperData
+        {
+            Type = PaperTypes.Todo, Title = "Edge menu regression",
+            IsVisible = false, IsCollapsed = true, CapsuleSide = DeepCapsuleSides.Right,
+            X = area.Left + 100, Y = area.Top + 100, Width = 320, Height = 260
+        };
+        try
+        {
+            state.UseCapsuleMode = true;
+            state.UseDeepCapsuleMode = true;
+            state.EnableAnimations = false;
+            state.ExperimentalEdgeCapsuleHoverPreview = false;
+            state.Papers.Add(paper);
+            controller.ShowPaper(paper, activate: false);
+            var windows = (Dictionary<string, PaperWindow>)typeof(AppController)
+                .GetField("_windows", Program.Private)!.GetValue(controller)!;
+            Program.Assert(windows.TryGetValue(paper.Id, out var window),
+                "edge menu fixture has a real PaperWindow");
+            var hostField = typeof(PaperWindow).GetField("_edgeCapsuleHost", Program.Private)!;
+            Until(() => hostField.GetValue(window) is EdgeCapsuleHost,
+                "real Edge capsule host is constructed after the placement is dispatched");
+            var host = (EdgeCapsuleHost)hostField.GetValue(window)!;
+            var content = (FrameworkElement)typeof(EdgeCapsuleHost)
+                .GetProperty("ContentArea", Program.Private)!.GetValue(host)!;
+            Until(() => host.IsVisible && content.ContextMenu != null &&
+                content.ActualWidth > 0 && content.ActualHeight > 0,
+                "real edge capsule has an initialized context menu");
+            var nativeWindow = (Window)typeof(EdgeCapsuleHost)
+                .GetProperty("Window", Program.Private)!.GetValue(host)!;
+            Program.Assert(WindowNative.HasNoActivateStyle(nativeWindow),
+                "edge owner stays NOACTIVATE for normal capsule interactions");
+            CheckCapsuleExternalForeground(controller, content, content.ContextMenu!,
+                host.Handle, "EDGE", host.RefreshSkin,
+                area.Left + 180, area.Top + 120);
+            Console.WriteLine("PASS real EDGE right-click: external foreground, stable popup, outside click (both material strengths)");
+        }
+        finally
+        {
+            if (state.Papers.Contains(paper)) controller.DeletePaper(paper);
+            (state.UseCapsuleMode, state.UseDeepCapsuleMode,
+                state.EnableAnimations, state.ExperimentalEdgeCapsuleHoverPreview,
+                state.PaperSkin, state.Theme, state.MatchAuxiliaryMaterialStrength) = original;
+            Theme.Invalidate();
+        }
+    }
+
+    private static void CheckMasterExternalForeground(
+        AppController controller, MasterCapsuleWindow master, FrameworkElement pill, ContextMenu menu) =>
+        CheckCapsuleExternalForeground(controller, pill, menu,
+            new WindowInteropHelper(master).Handle, "MASTER", master.UpdateTheme,
+            master.Left + master.Width + 240, master.Top + 70);
+
+    private static void CheckCapsuleExternalForeground(
+        AppController controller, FrameworkElement target, ContextMenu menu,
+        IntPtr ownerHwnd, string name, Action refreshTheme, double left, double top)
+    {
+        var start = new ProcessStartInfo(Path.Combine(AppContext.BaseDirectory, "PaperTodo.MicaChecks.exe"))
+        {
+            UseShellExecute = false,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            CreateNoWindow = true
+        };
+        start.ArgumentList.Add("--external-menu-window");
+        start.ArgumentList.Add(left.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        start.ArgumentList.Add(top.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        using var external = Process.Start(start) ??
+            throw new InvalidOperationException("Unable to launch the external foreground fixture");
+        try
+        {
+            var ready = external.StandardOutput.ReadLineAsync()
+                .WaitAsync(TimeSpan.FromSeconds(8)).GetAwaiter().GetResult();
+            Program.Assert(ready?.StartsWith("READY ", StringComparison.Ordinal) == true,
+                "external process exposes its real window handle");
+            var externalHwnd = new IntPtr(long.Parse(ready![6..],
+                System.Globalization.CultureInfo.InvariantCulture));
+            var externalX = (int)Math.Round(left + 95);
+            var externalY = (int)Math.Round(top + 60);
+            foreach (var fullMaterial in new[] { false, true })
+            {
+                controller.State.PaperSkin = PaperSkins.Mica;
+                controller.State.Theme = "light";
+                controller.State.MatchAuxiliaryMaterialStrength = fullMaterial;
+                Theme.Invalidate();
+                refreshTheme();
+                Wait(70);
+                // PaperWindow can replace Edge context-menu instances when its shell
+                // is refreshed; exercise the menu currently attached to the real surface.
+                menu = target.ContextMenu ??
+                    throw new InvalidOperationException(name + " has no live owner context menu");
+
+                SetCursorPos(externalX, externalY);
+                Wait(30);
+                mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
+                mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+                Until(() => GetForegroundWindow() == externalHwnd,
+                    "external process owns foreground before " + name + " right click");
+
+                var point = target.PointToScreen(new Point(target.ActualWidth / 2, target.ActualHeight / 2));
+                var clickX = (int)Math.Round(point.X);
+                var clickY = (int)Math.Round(point.Y);
+                SetCursorPos(clickX, clickY);
+                Wait(30);
+                var hit = WindowFromPoint(new CursorPoint { X = clickX, Y = clickY });
+                if (name == "EDGE")
+                {
+                    Console.WriteLine($"EDGE native hit: point={clickX},{clickY} window={hit} owner={ownerHwnd} " +
+                        $"target={target.ActualWidth:F1}x{target.ActualHeight:F1}");
+                    Program.Assert(hit == ownerHwnd,
+                        "real mouse must hit the Edge HWND rather than a transparent margin or another window");
+                }
+                var openedCount = 0;
+                var closedCount = 0;
+                RoutedEventHandler opened = (_, _) => openedCount++;
+                RoutedEventHandler closed = (_, _) => closedCount++;
+                menu.Opened += opened;
+                menu.Closed += closed;
+                try
+                {
+                    mouse_event(0x0008, 0, 0, 0, UIntPtr.Zero);
+                    mouse_event(0x0010, 0, 0, 0, UIntPtr.Zero);
+                    Until(() => menu.IsOpen || openedCount > 0,
+                        name + " menu receives a real right click");
+                    Wait(150);
+                    Program.Assert(menu.IsOpen,
+                        $"{name} menu remains open (opened={openedCount}, closed={closedCount}, foreground={GetForegroundWindow()})");
+                }
+                finally
+                {
+                    menu.Opened -= opened;
+                    menu.Closed -= closed;
+                }
+                var popupHwnd = (PresentationSource.FromVisual(menu) as HwndSource)?.Handle ?? IntPtr.Zero;
+                Program.Assert(menu.IsOpen && popupHwnd != IntPtr.Zero &&
+                    GetForegroundWindow() is var foreground &&
+                    (foreground == ownerHwnd || foreground == popupHwnd),
+                    name + " menu activation precedes WPF mouse capture without immediate dismissal");
+
+                SetCursorPos(externalX, externalY);
+                Wait(30);
+                mouse_event(0x0002, 0, 0, 0, UIntPtr.Zero);
+                mouse_event(0x0004, 0, 0, 0, UIntPtr.Zero);
+                Until(() => !menu.IsOpen, "cross-process outside click dismisses " + name + " popup");
+                Wait(50);
+            }
+        }
+        finally
+        {
+            menu.IsOpen = false;
+            if (!external.HasExited)
+            {
+                try { external.StandardInput.WriteLine(); }
+                catch (IOException) { }
+                if (!external.WaitForExit(3000))
+                {
+                    external.Kill(entireProcessTree: true);
+                }
+            }
         }
     }
     private static void AssertNoPopupFade(ContextMenu menu)
@@ -737,6 +911,8 @@ internal static class MaterialPresentationChecks
     [DllImport("user32.dll")] private static extern bool SetCursorPos(int x, int y);
     [DllImport("user32.dll")] private static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
     [DllImport("user32.dll")] private static extern void keybd_event(byte virtualKey, byte scanCode, uint flags, UIntPtr extra);
+    [DllImport("user32.dll")] private static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] private static extern IntPtr WindowFromPoint(CursorPoint point);
 
     private static SkinBorder? Find(DependencyObject node)
     {
