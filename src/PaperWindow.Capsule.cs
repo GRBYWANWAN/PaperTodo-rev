@@ -856,6 +856,18 @@ var expandedHeight = collapsed
             }
         }
 
+        if (animate && !collapsed && activateOnExpand)
+        {
+            // The initial capsule-sized frame is ready. Consume the user's activation before
+            // queue handoff or native surface preparation can pump/publish an expansion frame.
+            TryActivateAfterCapsuleInteraction();
+            // Activation invokes application/plugin handlers and may pump a Render turn.
+            // A reentrant hide, close or reversal must not continue this obsolete expansion.
+            if (transitionGeneration != _collapseTransitionGeneration ||
+                _windowLifecycle != PaperWindowLifecycleState.Alive || !IsPaperFormTransitioning)
+                return;
+        }
+
         if (!collapsed)
         {
             ChangeEdgeCapsulePaperForm(
@@ -1174,6 +1186,12 @@ var expandedHeight = collapsed
                 FinishExpandSnapStateRestore();
             }
             UpdateTaskbarVisibility();
+            if (!collapsed && activateOnExpand &&
+                transitionGeneration == _collapseTransitionGeneration &&
+                _windowLifecycle == PaperWindowLifecycleState.Alive && !_paper.IsCollapsed)
+            {
+                TryActivateAfterCapsuleInteraction();
+            }
         }
 
         RefreshPaperContextMenus();
@@ -1181,29 +1199,32 @@ var expandedHeight = collapsed
 
         if (!collapsed && activateOnExpand)
         {
-            QueueActivateAfterExpandInteraction(transitionGeneration);
+            QueueRestoreFocusAfterExpandInteraction(transitionGeneration);
         }
     }
 
-    private void QueueActivateAfterExpandInteraction(int transitionGeneration)
+    private void QueueRestoreFocusAfterExpandInteraction(int transitionGeneration)
     {
-        // Capsule mouse-up handlers clear native keyboard focus after SetCollapsedState returns,
-        // and repeat that cleanup at Background priority. Run below Background so the explicit
-        // user activation is the final focus operation even when animations are disabled.
+        // Capsule mouse-up handlers clear native keyboard focus after SetCollapsedState returns.
+        // Repair that focus only while this interaction still owns the foreground. Never queue
+        // activation here: a later user switch must win, including during the animation.
         Dispatcher.BeginInvoke(
             (Action)(() =>
             {
                 if (transitionGeneration != _collapseTransitionGeneration ||
+                    _windowLifecycle != PaperWindowLifecycleState.Alive ||
                     _paper.IsCollapsed ||
                     !IsVisible ||
+                    IsExperimentalPassive ||
+                    WindowNative.ForegroundWindow != new WindowInteropHelper(this).Handle ||
                     _controller.FullscreenAvoidanceWindowFor(this) != IntPtr.Zero)
                 {
                     return;
                 }
 
-                TryActivateAfterCapsuleInteraction();
+                Focus();
             }),
-            System.Windows.Threading.DispatcherPriority.ContextIdle);
+            System.Windows.Threading.DispatcherPriority.Send);
     }
 
     // Runs when an expand transition finishes. If the paper was collapsed while maximized,

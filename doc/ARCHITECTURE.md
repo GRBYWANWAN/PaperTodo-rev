@@ -467,7 +467,7 @@ Debug 包可显式启用内存诊断：`EdgeDiagnosticObservation` 观察既有�
 - `Ctrl+W` 在 HWND 边界注册，使纸片已经成为前台窗口但 WPF 暂时没有 keyboard-focus target 时仍能响应；`PreviewKeyDown` 只保留为 WPF routed-key fallback。
 - 标题区中键采用 mouse-down / mouse-up 同区确认，只在展开且未进入高级交互锁定时触发。
 - 两种手势最终都向现有 `_closeButton` 发送同一个 routed `Click`，因此“关闭按钮此刻意味着折叠、隐藏还是其他既有策略”仍只有一个 owner，不在快捷手势中复制。
-- 从 `NOACTIVATE` 胶囊显式打开纸片时，激活路径以 OS foreground HWND 为最终 truth；必要时补 `Activate` / foreground 请求后再 `Focus`，避免 WPF `IsActive` / focus 状态残留在旧窗口。
+- 从 `NOACTIVATE` 胶囊显式打开纸片时，在初始形状就绪后、边缘队列交接和展开动画启动前请求激活，以 OS foreground HWND 为最终 truth；必要时补 `Activate` / foreground 请求后再 `Focus`，避免 WPF `IsActive` / focus 状态残留在旧窗口。鼠标事件后的焦点修复只在同代纸片仍拥有前台时执行，不排队重试激活；同步激活引发的回调若取消、反转或关闭纸片，不再启动旧动画。
 
 纸片实际隐藏与销毁前共用 `PaperWindow` 的前台交接入口，以当前 OS foreground 和实时 Z-order 选择仍可操作的下一窗口；批量隐藏已标记不可见的纸片不参与接替。业务关闭语义、数据删除与辅助 owner 生命周期不由此入口改变。后台撤下、退出和用户已切走时不主动激活；不保留旧前台窗口、不排队重试抢焦点。
 
