@@ -37,6 +37,8 @@
 
 实际执行需要 Windows、.NET 10 SDK、PowerShell 7 和固定的 `vendor/wpf-notifyicon` 子模块；插件组需要 Node.js。窗口、输入和渲染检查需要可用的 Windows/WPF 桌面，不能并行争用鼠标或前台窗口。数据故障注入必须使用测试隔离目录，不指向日常数据。
 
+Markdown 编辑检查中的图片用例默认只使用内存 `DataObject` 和隔离 LMDB，覆盖 PNG 透明像素、格式优先级、旧 Bitmap 截图兼容、单步撤销／重做、数据库重开，以及添加图片格式时保留原有文本和富文本数据。实际系统剪贴板往返需单独运行 `dotnet run --project tests/PaperTodo.MarkdownEditingChecks -c Release -- --clipboard`。此模式会用合成图片替换当前剪贴板，必须与其他剪贴板操作串行；它检查复制方法返回后 PNG 与 Bitmap 都可读取，单图选区复制保留 Markdown、HTML 和 RTF，以及写入进程退出后 PNG 像素仍完整。
+
 因共享 Windows CI 的 WPF/DWM 桌面合成截图可在未修改代码的基线上随机漏掉真实 WPF 内容，最终桌面截图不再属于自动化验收（D-057）。本组仍执行真实 Windows 窗口与材质状态、WPF 离屏像素、失效清理、Aero 反光等确定性检查；它们不等于真实 Windows 11／HDR／多屏外观验收。后者只在实际需要发布材质变更时人工确认，不改用其他 CI 机器跑同一组截图。命令行的 `--no-raster` 仍可跳过部分 WPF 离屏图像检查，但不能视为相关行为已通过。
 
 现有 CI 调用同一入口，保持触发条件和配置差异；不因提供 `all` 就把它放进每次 CI。执行器顺序运行并汇总原始失败与耗时，不安装环境、不自动修复或重试、不把未执行项目报告为通过。插件示例检查会重建仓库内原生产物并检查 `plugins/` 差异，这是构建验证，不是只读命令，也不会安装到日常数据目录。
