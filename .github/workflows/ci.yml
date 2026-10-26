@@ -1,0 +1,60 @@
+# PaperTodo —— 适用于 fork 的入门 CI（构建 + 回归测试）
+#
+# 说明：本项目 .github/workflows/ 下已有一套更完整的官方工作流（发布、持久化、
+# 插件、Pages 等）。本文件是一个"简单自包含"的入门版：每次 push 和 PR 都会
+# 编译 Release 并跑一遍项目自带的回归检查，适合 fork 后想快速看到 CI 绿勾使用。
+# 如你只需要跑通构建与测试，加这一个文件即可；其余场景请启用官方已有工作流。
+
+name: CI
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build + regression checks
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    defaults:
+      run:
+        shell: pwsh
+
+    env:
+      DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+      DOTNET_NOLOGO: "true"
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          # 托盘图标子模块用 Nerdbank.GitVersioning 计算版本，需要足够历史
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Restore
+        run: dotnet restore .\PaperTodo.csproj
+
+      - name: Build (Release)
+        run: dotnet build .\PaperTodo.csproj -c Release --no-restore
+
+      - name: Run regression checks
+        run: |
+          ./tools/testing/Run-Checks.ps1 -Group all -List
+          ./tools/testing/Run-Checks.ps1 -Group regression
